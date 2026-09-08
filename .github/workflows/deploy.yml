@@ -1,1 +1,950 @@
+import { useState, useMemo, useRef, useEffect } from "react";
+import * as XLSX from "xlsx";
 
+/* ────────────────────────────────────────────────────────────
+   FacilityPro v4 — schema-driven CMMS
+   Everything (modules, fields, options, branding) is editable.
+   Excel import + export on every module.
+   ──────────────────────────────────────────────────────────── */
+
+const ACCENTS = {
+  teal:   { name:"Teal",   c:"#0D9488", soft:"#F0FDFA", text:"#0F766E" },
+  indigo: { name:"Indigo", c:"#4F46E5", soft:"#EEF2FF", text:"#4338CA" },
+  amber:  { name:"Amber",  c:"#B45309", soft:"#FFFBEB", text:"#92400E" },
+  rose:   { name:"Rose",   c:"#BE123C", soft:"#FFF1F2", text:"#9F1239" },
+  slate:  { name:"Graphite",c:"#334155",soft:"#F8FAFC", text:"#1E293B" },
+};
+
+const TONE = {
+  "Critical":"#DC2626","High":"#D97706","Medium":"#2563EB","Low":"#16A34A",
+  "New":"#6366F1","Assigned":"#D97706","In Progress":"#2563EB","On Hold":"#7C3AED",
+  "Completed":"#059669","Closed":"#64748B","Cancelled":"#DC2626",
+  "Overdue":"#DC2626","Due Soon":"#D97706","Valid":"#059669","Scheduled":"#2563EB",
+  "OK":"#059669","Low Stock":"#D97706","Out":"#DC2626",
+  "Operational":"#059669","Needs Service":"#D97706","Out of Service":"#DC2626",
+  "Active":"#059669","Inactive":"#64748B",
+};
+
+const uid = p => `${p}-${Math.random().toString(36).slice(2,7).toUpperCase()}`;
+const money = n => "Rs. " + (Number(n)||0).toLocaleString("en-PK");
+const F = { text:"Text", number:"Number", select:"Choice", date:"Date", long:"Paragraph" };
+
+/* ── seed schema ─────────────────────────────────────────── */
+const col = (key,label,type="text",options)=>({ key,label,type,options });
+
+const SEED = {
+  workorders:{
+    label:"Work Orders", icon:"🧰", idPrefix:"WO",
+    columns:[
+      col("id","WO No."),
+      col("title","Title"),
+      col("priority","Priority","select",["Critical","High","Medium","Low"]),
+      col("category","Category","select",["HVAC","Electrical","Plumbing","Life Safety","Vertical Transport","Security","Cleaning","Mechanical","Other"]),
+      col("site","Site","select",["Karachi HO","Site 3","Block A","Block B","Warehouse"]),
+      col("asset","Asset"),
+      col("assignee","Assigned To"),
+      col("status","Status","select",["New","Assigned","In Progress","On Hold","Completed","Closed","Cancelled"]),
+      col("raised","Raised","date"),
+      col("dueBy","Due By","date"),
+      col("cost","Cost (Rs.)","number"),
+      col("notes","Notes","long"),
+    ],
+    rows:[
+      { id:"WO-1041", title:"Lift out of service — Block A", priority:"Critical", category:"Vertical Transport", site:"Block A", asset:"LIFT-01", assignee:"Ali Hassan", status:"In Progress", raised:"2026-09-07", dueBy:"2026-09-08", cost:8000, notes:"Control board fault. Passengers evacuated safely." },
+      { id:"WO-1040", title:"Blocked drain — basement", priority:"High", category:"Plumbing", site:"Karachi HO", asset:"PLB-07", assignee:"Usman Tariq", status:"Assigned", raised:"2026-09-06", dueBy:"2026-09-09", cost:0, notes:"Water pooling near electrical panel — H&S risk." },
+      { id:"WO-1039", title:"Boiler pressure low", priority:"High", category:"HVAC", site:"Block B", asset:"BLR-04", assignee:"Ali Hassan", status:"In Progress", raised:"2026-09-06", dueBy:"2026-09-08", cost:9500, notes:"PRV likely needs replacement." },
+      { id:"WO-1038", title:"Door access reader fault", priority:"Medium", category:"Security", site:"Karachi HO", asset:"ACC-01", assignee:"", status:"New", raised:"2026-09-05", dueBy:"2026-09-11", cost:0, notes:"Staff using backup entry." },
+      { id:"WO-1037", title:"Car park lighting out", priority:"Medium", category:"Electrical", site:"Karachi HO", asset:"LTG-22", assignee:"Kamran Baig", status:"Completed", raised:"2026-09-04", dueBy:"2026-09-06", cost:11200, notes:"6 LED drivers replaced." },
+      { id:"WO-1033", title:"Generator monthly PM", priority:"Low", category:"Electrical", site:"Site 3", asset:"GEN-02", assignee:"Kamran Baig", status:"Closed", raised:"2026-09-01", dueBy:"2026-09-05", cost:5200, notes:"All checks passed." },
+    ],
+  },
+  assets:{
+    label:"Assets", icon:"🏭", idPrefix:"AST",
+    columns:[
+      col("id","Asset ID"), col("name","Name"),
+      col("category","Category","select",["HVAC","Electrical","Plumbing","Life Safety","Vertical Transport","Mechanical","Other"]),
+      col("site","Location"),
+      col("status","Status","select",["Operational","Needs Service","Out of Service"]),
+      col("health","Health %","number"), col("lastService","Last Service","date"),
+      col("nextService","Next Service","date"), col("ytdCost","YTD Cost (Rs.)","number"),
+      col("breakdowns","Breakdowns","number"), col("manufacturer","Manufacturer"), col("serial","Serial"),
+    ],
+    rows:[
+      { id:"AHU-03", name:"Air Handling Unit 3", category:"HVAC", site:"Floor 4", status:"Needs Service", health:75, lastService:"2026-07-10", nextService:"2026-09-20", ytdCost:142000, breakdowns:4, manufacturer:"Carrier", serial:"AHU-2018-0034" },
+      { id:"BLR-04", name:"Boiler Unit 4", category:"HVAC", site:"Basement", status:"Needs Service", health:48, lastService:"2026-03-14", nextService:"2026-09-08", ytdCost:210000, breakdowns:9, manufacturer:"Rinnai", serial:"BLR-2015-KHI" },
+      { id:"GEN-02", name:"Standby Generator 250kVA", category:"Electrical", site:"Site 3", status:"Operational", health:88, lastService:"2026-08-02", nextService:"2026-10-02", ytdCost:85000, breakdowns:1, manufacturer:"Perkins", serial:"GEN-KHI-002" },
+      { id:"LIFT-01", name:"Passenger Lift A", category:"Vertical Transport", site:"Block A", status:"Out of Service", health:20, lastService:"2026-01-19", nextService:"2026-09-15", ytdCost:380000, breakdowns:17, manufacturer:"ThyssenKrupp", serial:"LIFT-01-A" },
+      { id:"FP-01", name:"Fire Detection Panel", category:"Life Safety", site:"Reception", status:"Operational", health:92, lastService:"2026-06-01", nextService:"2026-12-01", ytdCost:42000, breakdowns:0, manufacturer:"Notifier", serial:"FP-MAINS-01" },
+      { id:"CHW-01", name:"Chiller Unit 1", category:"HVAC", site:"Roof", status:"Operational", health:82, lastService:"2026-08-11", nextService:"2027-02-11", ytdCost:95000, breakdowns:3, manufacturer:"Trane", serial:"CHW-ROOF-001" },
+    ],
+  },
+  ppm:{
+    label:"Planned Maintenance", icon:"🗓️", idPrefix:"PPM",
+    columns:[
+      col("id","Ref"), col("task","Task"), col("asset","Asset"),
+      col("frequency","Frequency","select",["Weekly","Monthly","Quarterly","6-Monthly","Yearly"]),
+      col("assignee","Owner"), col("due","Due","date"),
+      col("status","Status","select",["Scheduled","Due Soon","Overdue","Completed"]),
+      col("hours","Est. Hours","number"),
+    ],
+    rows:[
+      { id:"PPM-001", task:"Annual boiler service", asset:"BLR-04", frequency:"Yearly", assignee:"Ali Hassan", due:"2026-09-08", status:"Overdue", hours:4 },
+      { id:"PPM-002", task:"Weekly fire alarm test", asset:"FP-01", frequency:"Weekly", assignee:"In-house", due:"2026-09-09", status:"Due Soon", hours:0.5 },
+      { id:"PPM-003", task:"Monthly generator load run", asset:"GEN-02", frequency:"Monthly", assignee:"Kamran Baig", due:"2026-09-10", status:"Scheduled", hours:2 },
+      { id:"PPM-004", task:"AHU filter replacement", asset:"AHU-03", frequency:"Quarterly", assignee:"Ali Hassan", due:"2026-09-11", status:"Scheduled", hours:1.5 },
+      { id:"PPM-005", task:"Lift thorough examination", asset:"LIFT-01", frequency:"6-Monthly", assignee:"LiftPro Karachi", due:"2026-09-15", status:"Scheduled", hours:3 },
+    ],
+  },
+  compliance:{
+    label:"Compliance", icon:"📋", idPrefix:"CMP",
+    columns:[
+      col("id","Ref"), col("certificate","Certificate"), col("regulation","Regulation"),
+      col("asset","Applies To"), col("owner","Responsible"),
+      col("last","Last Done","date"), col("next","Next Due","date"),
+      col("status","Status","select",["Valid","Due Soon","Overdue","Expired"]),
+      col("notes","Notes","long"),
+    ],
+    rows:[
+      { id:"CMP-001", certificate:"Gas Safety Certificate", regulation:"OGRA Safety Regulations", asset:"BLR-04", owner:"Ahmed Raza", last:"2025-09-05", next:"2026-09-05", status:"Overdue", notes:"Book TechServ immediately." },
+      { id:"CMP-002", certificate:"Fire Alarm Inspection", regulation:"PSQCA Fire Code", asset:"All sites", owner:"Sara Khan", last:"2026-07-02", next:"2027-01-02", status:"Valid", notes:"All zones passed." },
+      { id:"CMP-003", certificate:"Lift Thorough Examination", regulation:"Lift Safety Act", asset:"LIFT-01", owner:"Ahmed Raza", last:"2026-03-11", next:"2026-09-20", status:"Due Soon", notes:"Schedule with LiftPro." },
+      { id:"CMP-004", certificate:"Legionella Risk Assessment", regulation:"Health & Safety Regs", asset:"Water systems", owner:"Sara Khan", last:"2026-06-06", next:"2027-06-06", status:"Valid", notes:"Monthly temp checks running." },
+      { id:"CMP-005", certificate:"Fixed Wiring (EICR)", regulation:"NEPRA Regulations", asset:"All sites", owner:"Ahmed Raza", last:"2026-01-15", next:"2031-01-15", status:"Valid", notes:"5-year cycle." },
+    ],
+  },
+  inventory:{
+    label:"Inventory", icon:"📦", idPrefix:"INV",
+    columns:[
+      col("id","Code"), col("name","Item"),
+      col("category","Category","select",["HVAC Parts","Electrical","Plumbing","Life Safety","Mechanical","Consumables"]),
+      col("stock","In Stock","number"), col("min","Min","number"), col("max","Max","number"),
+      col("unitCost","Unit Cost (Rs.)","number"),
+      col("status","Status","select",["OK","Low Stock","Out"]),
+      col("supplier","Supplier"), col("location","Store Location"),
+    ],
+    rows:[
+      { id:"INV-001", name:"AHU Belt Drive", category:"HVAC Parts", stock:12, min:5, max:20, unitCost:850, status:"OK", supplier:"TechServ Pakistan", location:"Store A · Shelf 3" },
+      { id:"INV-002", name:"HVAC Filter G4", category:"HVAC Parts", stock:3, min:10, max:30, unitCost:1200, status:"Low Stock", supplier:"SafeAir Solutions", location:"Store A · Shelf 4" },
+      { id:"INV-003", name:"Circuit Breaker 32A", category:"Electrical", stock:0, min:5, max:15, unitCost:2400, status:"Out", supplier:"PowerPak Electrics", location:"Store B · Shelf 1" },
+      { id:"INV-004", name:"Pump Seal Kit", category:"Plumbing", stock:8, min:4, max:12, unitCost:3600, status:"OK", supplier:"Local Supplier", location:"Store B · Shelf 3" },
+      { id:"INV-005", name:"Fire Alarm Module", category:"Life Safety", stock:2, min:5, max:10, unitCost:8500, status:"Low Stock", supplier:"Notifier Dist.", location:"Store A · Shelf 1" },
+      { id:"INV-006", name:"Generator Oil 20L", category:"Mechanical", stock:15, min:6, max:24, unitCost:4200, status:"OK", supplier:"Shell Pakistan", location:"Store C · Shelf 2" },
+    ],
+  },
+  contractors:{
+    label:"Contractors", icon:"🤝", idPrefix:"CON",
+    columns:[
+      col("id","Ref"), col("name","Company"), col("discipline","Discipline"),
+      col("contact","Contact"), col("phone","Phone"), col("email","Email"),
+      col("sla","SLA"), col("rating","Rating (1-5)","number"),
+      col("insurance","Insurance","select",["Valid","Expiring","Expired"]),
+      col("insuranceExp","Insurance Expiry","date"), col("spend","YTD Spend (Rs.)","number"),
+    ],
+    rows:[
+      { id:"CON-01", name:"TechServ Pakistan", discipline:"HVAC / Boilers", contact:"Muhammad Ahsan", phone:"0300-2001234", email:"ahsan@techserv.pk", sla:"4h emergency", rating:4, insurance:"Valid", insuranceExp:"2027-03-01", spend:320000 },
+      { id:"CON-02", name:"LiftPro Karachi", discipline:"Vertical Transport", contact:"Tariq Mehmood", phone:"0321-5559900", email:"tariq@liftpro.pk", sla:"2h emergency", rating:5, insurance:"Valid", insuranceExp:"2027-06-01", spend:180000 },
+      { id:"CON-03", name:"PowerPak Electrics", discipline:"Electrical", contact:"Rizwan Ali", phone:"0333-9001122", email:"rizwan@powerpak.pk", sla:"8h standard", rating:3, insurance:"Expiring", insuranceExp:"2026-10-01", spend:240000 },
+      { id:"CON-04", name:"AquaCheck PK", discipline:"Water / Legionella", contact:"Saima Noor", phone:"0312-4445566", email:"saima@aquacheck.pk", sla:"Next day", rating:4, insurance:"Valid", insuranceExp:"2027-01-01", spend:95000 },
+      { id:"CON-05", name:"SafeAir Solutions", discipline:"Ventilation / AHU", contact:"Faisal Raza", phone:"0345-1113344", email:"faisal@safeair.pk", sla:"Same day", rating:5, insurance:"Valid", insuranceExp:"2027-08-01", spend:410000 },
+    ],
+  },
+  people:{
+    label:"People", icon:"👥", idPrefix:"USR",
+    columns:[
+      col("id","Ref"), col("name","Name"),
+      col("role","Role","select",["Facility Manager","Supervisor","Technician","Requester","Admin"]),
+      col("email","Email"), col("phone","Phone"), col("site","Site"),
+      col("status","Status","select",["Active","Inactive"]),
+    ],
+    rows:[
+      { id:"USR-001", name:"Ahmed Raza", role:"Facility Manager", email:"ahmed@crystal-fm.pk", phone:"0300-1234567", site:"All sites", status:"Active" },
+      { id:"USR-002", name:"Ali Hassan", role:"Technician", email:"ali@crystal-fm.pk", phone:"0321-9876543", site:"Karachi HO", status:"Active" },
+      { id:"USR-003", name:"Usman Tariq", role:"Technician", email:"usman@crystal-fm.pk", phone:"0333-5554433", site:"Karachi HO", status:"Active" },
+      { id:"USR-004", name:"Kamran Baig", role:"Technician", email:"kamran@crystal-fm.pk", phone:"0345-1122334", site:"Site 3", status:"Active" },
+      { id:"USR-005", name:"Sara Khan", role:"Supervisor", email:"sara@crystal-fm.pk", phone:"0312-9988776", site:"All sites", status:"Active" },
+    ],
+  },
+};
+
+
+/* ── persistence ─────────────────────────────────────────────
+   Saves to the browser's own storage so work survives a refresh.
+   Every access is guarded: in sandboxed previews where storage is
+   blocked the app still runs, just without saving.
+   ──────────────────────────────────────────────────────────── */
+const KEY = "facilitypro.v4.state";
+const storage = {
+  available(){ try { const k="__fp_test"; window.localStorage.setItem(k,"1"); window.localStorage.removeItem(k); return true; } catch { return false; } },
+  load(){ try { const raw = window.localStorage.getItem(KEY); return raw ? JSON.parse(raw) : null; } catch { return null; } },
+  save(v){ try { window.localStorage.setItem(KEY, JSON.stringify(v)); return true; } catch { return false; } },
+  clear(){ try { window.localStorage.removeItem(KEY); } catch {} },
+};
+const SAVED = storage.load();
+const CAN_SAVE = storage.available();
+
+/* ── primitives ──────────────────────────────────────────── */
+const Pill = ({ v }) => {
+  const c = TONE[v] || "#64748B";
+  return <span style={{ background:c+"14", color:c, border:`1px solid ${c}33`, fontSize:11.5, fontWeight:650, padding:"3px 9px", borderRadius:7, whiteSpace:"nowrap" }}>{v}</span>;
+};
+const Btn = ({ children, onClick, kind="ghost", accent, style, disabled, title }) => {
+  const map = {
+    solid:{ background:accent, color:"#fff", border:"1px solid transparent" },
+    ghost:{ background:"#fff", color:"#334155", border:"1px solid #E2E8F0" },
+    quiet:{ background:"transparent", color:"#64748B", border:"1px solid transparent" },
+    danger:{ background:"#fff", color:"#DC2626", border:"1px solid #FECACA" },
+  };
+  return <button title={title} onClick={onClick} disabled={disabled} style={{ padding:"7px 13px", borderRadius:9, fontSize:12.5, fontWeight:600, cursor:disabled?"not-allowed":"pointer", opacity:disabled?.5:1, display:"inline-flex", alignItems:"center", gap:6, fontFamily:"inherit", ...map[kind], ...style }}>{children}</button>;
+};
+const inputStyle = { width:"100%", padding:"9px 11px", borderRadius:9, border:"1px solid #E2E8F0", fontSize:13, background:"#fff", color:"#0F172A", boxSizing:"border-box", fontFamily:"inherit" };
+const Field = ({ label, children }) => (
+  <label style={{ display:"block", marginBottom:12 }}>
+    <span style={{ fontSize:11.5, fontWeight:650, color:"#64748B", display:"block", marginBottom:5 }}>{label}</span>
+    {children}
+  </label>
+);
+const Sheet = ({ open, onClose, title, sub, children, footer, width=560 }) => {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(15,23,42,.45)", zIndex:900, display:"flex", justifyContent:"center", alignItems:"flex-start", padding:"5vh 14px", overflowY:"auto" }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#fff", borderRadius:16, width:"100%", maxWidth:width, boxShadow:"0 24px 60px rgba(15,23,42,.25)" }}>
+        <div style={{ padding:"18px 20px", borderBottom:"1px solid #F1F5F9", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+          <div>
+            <div style={{ fontSize:16, fontWeight:750, color:"#0F172A" }}>{title}</div>
+            {sub && <div style={{ fontSize:12, color:"#94A3B8", marginTop:3 }}>{sub}</div>}
+          </div>
+          <button onClick={onClose} style={{ border:"none", background:"#F1F5F9", borderRadius:8, width:30, height:30, cursor:"pointer", color:"#64748B", fontSize:14 }}>✕</button>
+        </div>
+        <div style={{ padding:20 }}>{children}</div>
+        {footer && <div style={{ padding:"14px 20px", borderTop:"1px solid #F1F5F9", display:"flex", gap:8, justifyContent:"flex-end", flexWrap:"wrap" }}>{footer}</div>}
+      </div>
+    </div>
+  );
+};
+
+/* ── record form ─────────────────────────────────────────── */
+function RecordForm({ columns, value, onChange }) {
+  const set = (k,v) => onChange({ ...value, [k]:v });
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"0 14px" }}>
+      {columns.map(c => (
+        <div key={c.key} style={{ gridColumn: c.type==="long" ? "1 / -1" : "auto" }}>
+          <Field label={c.label}>
+            {c.type==="select" ? (
+              <select value={value[c.key]||""} onChange={e=>set(c.key,e.target.value)} style={inputStyle}>
+                <option value="">—</option>
+                {(c.options||[]).map(o=><option key={o}>{o}</option>)}
+              </select>
+            ) : c.type==="long" ? (
+              <textarea value={value[c.key]||""} onChange={e=>set(c.key,e.target.value)} style={{ ...inputStyle, minHeight:74, resize:"vertical" }} />
+            ) : (
+              <input type={c.type==="number"?"number":c.type==="date"?"date":"text"}
+                value={value[c.key] ?? ""} onChange={e=>set(c.key, c.type==="number"? (e.target.value===""?"":Number(e.target.value)) : e.target.value)}
+                style={inputStyle} />
+            )}
+          </Field>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── field designer ──────────────────────────────────────── */
+function FieldDesigner({ open, onClose, mod, onSave, accent }) {
+  const [cols, setCols] = useState(mod.columns);
+  useEffect(()=>{ if(open) setCols(mod.columns); }, [open, mod]);
+  const upd = (i,patch) => setCols(cols.map((c,j)=>j===i?{...c,...patch}:c));
+  const move = (i,d) => { const n=[...cols]; const t=n[i+d]; if(!t) return; n[i+d]=n[i]; n[i]=t; setCols(n); };
+  return (
+    <Sheet open={open} onClose={onClose} width={720}
+      title={`Customise fields — ${mod.label}`}
+      sub="Rename, reorder, retype or remove any field. Choice fields take comma-separated options."
+      footer={<>
+        <Btn onClick={()=>setCols([...cols,{ key:"field_"+Date.now().toString(36), label:"New field", type:"text" }])}>+ Add field</Btn>
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn kind="solid" accent={accent} onClick={()=>{ onSave(cols.filter(c=>c.label.trim())); onClose(); }}>Save fields</Btn>
+      </>}>
+      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+        {cols.map((c,i)=>(
+          <div key={c.key} style={{ display:"grid", gridTemplateColumns:"1fr 120px 1fr auto", gap:8, alignItems:"center", background:"#F8FAFC", padding:9, borderRadius:10 }}>
+            <input value={c.label} onChange={e=>upd(i,{label:e.target.value})} style={{ ...inputStyle, padding:"7px 9px" }} />
+            <select value={c.type} onChange={e=>upd(i,{type:e.target.value})} style={{ ...inputStyle, padding:"7px 9px" }}>
+              {Object.entries(F).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+            </select>
+            {c.type==="select"
+              ? <input placeholder="Option A, Option B" value={(c.options||[]).join(", ")} onChange={e=>upd(i,{options:e.target.value.split(",").map(s=>s.trim()).filter(Boolean)})} style={{ ...inputStyle, padding:"7px 9px" }} />
+              : <div style={{ fontSize:11, color:"#94A3B8" }}>key: {c.key}</div>}
+            <div style={{ display:"flex", gap:3 }}>
+              <Btn kind="quiet" onClick={()=>move(i,-1)} title="Move up" style={{ padding:"5px 7px" }}>↑</Btn>
+              <Btn kind="quiet" onClick={()=>move(i,1)} title="Move down" style={{ padding:"5px 7px" }}>↓</Btn>
+              <Btn kind="quiet" onClick={()=>setCols(cols.filter((_,j)=>j!==i))} title="Remove" style={{ padding:"5px 7px", color:"#DC2626" }}>✕</Btn>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Sheet>
+  );
+}
+
+/* ── excel import ────────────────────────────────────────── */
+function ImportSheet({ open, onClose, mod, onImport, accent }) {
+  const [rows, setRows] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [map, setMap] = useState({});
+  const [mode, setMode] = useState("append");
+  const [addNew, setAddNew] = useState(true);
+  const [err, setErr] = useState("");
+  const fileRef = useRef();
+
+  const reset = () => { setRows(null); setHeaders([]); setMap({}); setErr(""); };
+  useEffect(()=>{ if(!open) reset(); }, [open]);
+
+  const read = async file => {
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const data = XLSX.utils.sheet_to_json(ws, { defval:"", raw:false });
+      if (!data.length) return setErr("That sheet has no rows.");
+      const hs = Object.keys(data[0]);
+      setHeaders(hs); setRows(data); setErr("");
+      const auto = {};
+      hs.forEach(h=>{
+        const hit = mod.columns.find(c => c.label.toLowerCase()===h.toLowerCase().trim() || c.key.toLowerCase()===h.toLowerCase().trim());
+        auto[h] = hit ? hit.key : "__new__";
+      });
+      setMap(auto);
+    } catch { setErr("Could not read that file. Use .xlsx, .xls or .csv."); }
+  };
+
+  const run = () => {
+    const newCols = [];
+    headers.forEach(h=>{
+      if (map[h]==="__new__" && addNew) {
+        const key = h.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"") || "col_"+newCols.length;
+        if (!mod.columns.some(c=>c.key===key)) newCols.push({ key, label:h, type: rows.every(r=>r[h]===""||!isNaN(Number(r[h])))?"number":"text" });
+      }
+    });
+    const mapped = rows.map((r,i)=>{
+      const o = {};
+      headers.forEach(h=>{
+        const target = map[h]==="__new__" ? (addNew ? (h.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"")) : null) : map[h];
+        if (!target || map[h]==="__skip__") return;
+        const col = [...mod.columns,...newCols].find(c=>c.key===target);
+        let v = r[h];
+        if (col?.type==="number") v = v===""?"":Number(String(v).replace(/[^0-9.\-]/g,""));
+        o[target] = v;
+      });
+      if (!o.id) o.id = `${mod.idPrefix}-${Date.now().toString(36).slice(-4)}${i}`.toUpperCase();
+      return o;
+    });
+    onImport({ rows:mapped, newCols, mode });
+    onClose();
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} width={640}
+      title={`Import ${mod.label} from Excel`}
+      sub="First row of the sheet is treated as the header row. Nothing is uploaded anywhere — it stays in this app."
+      footer={<>
+        {rows && <Btn onClick={reset}>Choose another file</Btn>}
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn kind="solid" accent={accent} disabled={!rows} onClick={run}>Import {rows?`${rows.length} rows`:""}</Btn>
+      </>}>
+      {!rows ? (
+        <div>
+          <div onClick={()=>fileRef.current?.click()} style={{ border:"1.5px dashed #CBD5E1", borderRadius:14, padding:"34px 20px", textAlign:"center", cursor:"pointer", background:"#F8FAFC" }}>
+            <div style={{ fontSize:26 }}>📥</div>
+            <div style={{ fontWeight:700, marginTop:8, color:"#0F172A" }}>Choose an .xlsx, .xls or .csv file</div>
+            <div style={{ fontSize:12, color:"#94A3B8", marginTop:4 }}>You'll get to map columns before anything changes</div>
+          </div>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display:"none" }} onChange={e=>e.target.files?.[0] && read(e.target.files[0])} />
+          <div style={{ fontSize:12, color:"#64748B", marginTop:14 }}>Tip: export this module first and use that file as your template — the headers will map automatically.</div>
+          {err && <div style={{ marginTop:12, color:"#DC2626", fontSize:12.5 }}>{err}</div>}
+        </div>
+      ) : (
+        <div>
+          <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap" }}>
+            {["append","replace"].map(m=>(
+              <button key={m} onClick={()=>setMode(m)} style={{ padding:"7px 12px", borderRadius:9, fontSize:12.5, fontWeight:650, cursor:"pointer", border:`1px solid ${mode===m?accent:"#E2E8F0"}`, background:mode===m?accent+"12":"#fff", color:mode===m?accent:"#64748B" }}>
+                {m==="append"?"Add to existing rows":"Replace all rows"}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize:11.5, fontWeight:650, color:"#64748B", marginBottom:8 }}>Column mapping</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:280, overflowY:"auto" }}>
+            {headers.map(h=>(
+              <div key={h} style={{ display:"grid", gridTemplateColumns:"1fr 16px 1fr", gap:8, alignItems:"center", background:"#F8FAFC", padding:8, borderRadius:9 }}>
+                <div style={{ fontSize:12.5, fontWeight:600, color:"#0F172A", overflow:"hidden", textOverflow:"ellipsis" }}>{h}</div>
+                <div style={{ color:"#CBD5E1" }}>→</div>
+                <select value={map[h]} onChange={e=>setMap({ ...map, [h]:e.target.value })} style={{ ...inputStyle, padding:"6px 8px" }}>
+                  {mod.columns.map(c=><option key={c.key} value={c.key}>{c.label}</option>)}
+                  <option value="__new__">＋ Create new field "{h}"</option>
+                  <option value="__skip__">Skip this column</option>
+                </select>
+              </div>
+            ))}
+          </div>
+          <label style={{ display:"flex", gap:8, alignItems:"center", marginTop:12, fontSize:12.5, color:"#475569" }}>
+            <input type="checkbox" checked={addNew} onChange={e=>setAddNew(e.target.checked)} /> Create fields for unmapped columns
+          </label>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+/* ── record detail (click any ID) ─────────────────────────── */
+const fmtVal = (c,v) => {
+  if (v===""||v==null) return "—";
+  if (c.type==="number") return /cost|spend|rs\./i.test(c.label) ? money(v) : Number(v).toLocaleString();
+  return String(v);
+};
+function RecordDetail({ mod, row, onClose, onEdit, accent, related }) {
+  if (!row) return null;
+  const title = row.title || row.name || row.task || row.certificate || row.id;
+  return (
+    <Sheet open={!!row} onClose={onClose} width={680} title={title} sub={`${mod.label} · ${row.id}`}
+      footer={<><Btn onClick={onClose}>Close</Btn>{onEdit && <Btn kind="solid" accent={accent} onClick={()=>{ onEdit(row); onClose(); }}>Edit record</Btn>}</>}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:"0 16px" }}>
+        {mod.columns.map(c=>(
+          <div key={c.key} style={{ gridColumn: c.type==="long" ? "1 / -1" : "auto", padding:"9px 0", borderBottom:"1px solid #F4F7FA" }}>
+            <div style={{ fontSize:11, fontWeight:650, color:"#94A3B8", marginBottom:4 }}>{c.label}</div>
+            <div style={{ fontSize:13, color:"#0F172A", lineHeight:1.5 }}>
+              {c.type==="select" && row[c.key] ? <Pill v={String(row[c.key])} /> : fmtVal(c,row[c.key])}
+            </div>
+          </div>
+        ))}
+      </div>
+      {related?.length>0 && (
+        <div style={{ marginTop:18 }}>
+          <div style={{ fontSize:12, fontWeight:700, color:"#0F172A", marginBottom:8 }}>Linked work orders</div>
+          {related.map(w=>(
+            <div key={w.id} style={{ display:"flex", justifyContent:"space-between", gap:10, alignItems:"center", padding:"8px 0", borderBottom:"1px solid #F4F7FA", fontSize:12.5 }}>
+              <span>{w.id} · {w.title}</span><Pill v={w.status} />
+            </div>
+          ))}
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+/* ── drill-down list (from dashboard KPIs) ────────────────── */
+function DrillSheet({ open, onClose, title, sub, mod, rows, accent }) {
+  const [rec, setRec] = useState(null);
+  useEffect(()=>{ if(!open) setRec(null); }, [open]);
+  if (!open || !mod) return null;
+  const cols = mod.columns.slice(0,5);
+  return (
+    <>
+      <Sheet open={open && !rec} onClose={onClose} width={780} title={title} sub={sub || `${rows.length} record${rows.length===1?"":"s"} · click a row for full detail`}
+        footer={<Btn onClick={onClose}>Close</Btn>}>
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+            <thead><tr>{cols.map(c=><th key={c.key} style={{ textAlign:"left", padding:"8px 10px", fontSize:11, fontWeight:700, color:"#64748B", borderBottom:"1px solid #E9EEF4", whiteSpace:"nowrap" }}>{c.label}</th>)}</tr></thead>
+            <tbody>
+              {rows.map(r=>(
+                <tr key={r.id} onClick={()=>setRec(r)} style={{ borderBottom:"1px solid #F4F7FA", cursor:"pointer" }}>
+                  {cols.map(c=>(
+                    <td key={c.key} style={{ padding:"10px 10px", color: c.key==="id"?accent:"#0F172A", fontWeight: c.key==="id"?700:400 }}>
+                      {c.type==="select" && r[c.key] ? <Pill v={String(r[c.key])} /> : fmtVal(c,r[c.key])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              {!rows.length && <tr><td colSpan={cols.length} style={{ padding:30, textAlign:"center", color:"#94A3B8" }}>Nothing in this group right now.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Sheet>
+      <RecordDetail mod={mod} row={rec} accent={accent} onClose={()=>setRec(null)} />
+    </>
+  );
+}
+
+/* ── data table module ───────────────────────────────────── */
+function ModulePage({ modKey, mod, setMod, accent, toast, brand, allRows }) {
+  const [q, setQ] = useState("");
+  const [filters, setFilters] = useState({});
+  const [sort, setSort] = useState({ key:mod.columns[0]?.key, dir:1 });
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [design, setDesign] = useState(false);
+  const [imp, setImp] = useState(false);
+  const [sel, setSel] = useState([]);
+  const [detail, setDetail] = useState(null);
+
+  useEffect(()=>{ setSort({ key:mod.columns[0]?.key, dir:1 }); setFilters({}); setSel([]); }, [modKey]);
+
+  const selectCols = mod.columns.filter(c=>c.type==="select");
+  const rows = useMemo(()=>{
+    let r = mod.rows.filter(row => {
+      const hay = Object.values(row).join(" ").toLowerCase();
+      if (q && !hay.includes(q.toLowerCase())) return false;
+      return Object.entries(filters).every(([k,v]) => !v || row[k]===v);
+    });
+    const { key, dir } = sort;
+    return [...r].sort((a,b)=>{
+      const x=a[key], y=b[key];
+      if (typeof x==="number" && typeof y==="number") return (x-y)*dir;
+      return String(x??"").localeCompare(String(y??""))*dir;
+    });
+  }, [mod.rows, q, filters, sort]);
+
+  const commit = rowsNext => setMod({ ...mod, rows:rowsNext });
+
+  const save = () => {
+    if (!draft.id) draft.id = uid(mod.idPrefix);
+    const exists = mod.rows.some(r=>r.id===draft.id && editing!=="new");
+    commit(exists ? mod.rows.map(r=>r.id===draft.id?draft:r) : [draft, ...mod.rows]);
+    toast(editing==="new" ? `${mod.label.replace(/s$/,"")} ${draft.id} created` : `${draft.id} updated`);
+    setEditing(null);
+  };
+  const del = ids => { commit(mod.rows.filter(r=>!ids.includes(r.id))); setSel([]); toast(`${ids.length} record${ids.length>1?"s":""} deleted`); };
+
+  const sheetData = () => rows.map(r => Object.fromEntries(mod.columns.map(c=>[c.label, r[c.key] ?? ""])));
+  const exportXlsx = () => {
+    const ws = XLSX.utils.json_to_sheet(sheetData());
+    ws["!cols"] = mod.columns.map(c=>({ wch: Math.max(12, Math.min(38, c.label.length+6)) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, mod.label.slice(0,30));
+    XLSX.writeFile(wb, `${brand.replace(/\s+/g,"_")}_${mod.label.replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`);
+    toast(`Exported ${rows.length} rows to Excel`);
+  };
+
+  const applyImport = ({ rows:incoming, newCols, mode }) => {
+    const cols = [...mod.columns, ...newCols];
+    setMod({ ...mod, columns:cols, rows: mode==="replace" ? incoming : [...incoming, ...mod.rows] });
+    toast(`Imported ${incoming.length} rows${newCols.length?` · ${newCols.length} new field(s)`:""}`);
+  };
+
+  const cell = (row,c) => {
+    const v = row[c.key];
+    if (c.key===mod.columns[0].key || c.key==="id")
+      return <button onClick={()=>setDetail(row)} style={{ border:"none", background:"none", padding:0, cursor:"pointer", color:accent, fontWeight:700, fontSize:"inherit", fontFamily:"inherit", textDecoration:"underline", textDecorationColor:accent+"55", textUnderlineOffset:2 }}>{String(v ?? "—")}</button>;
+    if (v===""||v==null) return <span style={{ color:"#CBD5E1" }}>—</span>;
+    if (c.type==="select") return <Pill v={String(v)} />;
+    if (c.key==="health") return (
+      <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+        <div style={{ width:46, height:5, background:"#F1F5F9", borderRadius:9 }}>
+          <div style={{ width:`${v}%`, height:5, borderRadius:9, background: v>=80?"#059669":v>=50?"#D97706":"#DC2626" }} />
+        </div><span style={{ fontVariantNumeric:"tabular-nums" }}>{v}%</span>
+      </div>
+    );
+    if (c.type==="number") return <span style={{ fontVariantNumeric:"tabular-nums" }}>{/cost|spend|rs\./i.test(c.label) ? money(v) : Number(v).toLocaleString()}</span>;
+    if (c.type==="long") return <span style={{ color:"#64748B" }}>{String(v).slice(0,60)}{String(v).length>60?"…":""}</span>;
+    return String(v);
+  };
+
+  return (
+    <div>
+      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap", marginBottom:14 }}>
+        <input placeholder={`Search ${mod.label.toLowerCase()}…`} value={q} onChange={e=>setQ(e.target.value)} style={{ ...inputStyle, width:230 }} />
+        {selectCols.slice(0,3).map(c=>(
+          <select key={c.key} value={filters[c.key]||""} onChange={e=>setFilters({ ...filters, [c.key]:e.target.value })} style={{ ...inputStyle, width:"auto", minWidth:130 }}>
+            <option value="">All {c.label}</option>
+            {(c.options||[]).map(o=><option key={o}>{o}</option>)}
+          </select>
+        ))}
+        <div style={{ flex:1 }} />
+        {sel.length>0 && <Btn kind="danger" onClick={()=>del(sel)}>Delete {sel.length}</Btn>}
+        <Btn onClick={()=>setImp(true)}>📥 Import Excel</Btn>
+        <Btn onClick={exportXlsx}>📊 Export Excel</Btn>
+        <Btn onClick={()=>setDesign(true)}>⚙ Fields</Btn>
+        <Btn kind="solid" accent={accent} onClick={()=>{ setDraft({ id:uid(mod.idPrefix) }); setEditing("new"); }}>+ New</Btn>
+      </div>
+
+      <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, overflow:"hidden" }}>
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5, minWidth:Math.max(680, mod.columns.length*130) }}>
+            <thead>
+              <tr style={{ background:"#FBFCFE" }}>
+                <th style={{ padding:"11px 8px 11px 14px", width:30 }}>
+                  <input type="checkbox" checked={sel.length>0 && sel.length===rows.length} onChange={e=>setSel(e.target.checked?rows.map(r=>r.id):[])} />
+                </th>
+                {mod.columns.map(c=>(
+                  <th key={c.key} onClick={()=>setSort({ key:c.key, dir: sort.key===c.key ? -sort.dir : 1 })}
+                    style={{ padding:"11px 12px", textAlign:"left", fontSize:11.5, fontWeight:700, color:"#64748B", whiteSpace:"nowrap", cursor:"pointer", borderBottom:"1px solid #E9EEF4" }}>
+                    {c.label}{sort.key===c.key ? (sort.dir===1?" ↑":" ↓") : ""}
+                  </th>
+                ))}
+                <th style={{ borderBottom:"1px solid #E9EEF4" }} />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row=>(
+                <tr key={row.id} style={{ borderBottom:"1px solid #F4F7FA" }}>
+                  <td style={{ padding:"10px 8px 10px 14px" }}>
+                    <input type="checkbox" checked={sel.includes(row.id)} onChange={e=>setSel(e.target.checked?[...sel,row.id]:sel.filter(i=>i!==row.id))} />
+                  </td>
+                  {mod.columns.map(c=>(
+                    <td key={c.key} onDoubleClick={()=>{ setDraft(row); setEditing(row.id); }} style={{ padding:"10px 12px", color:"#0F172A", maxWidth:260 }}>{cell(row,c)}</td>
+                  ))}
+                  <td style={{ padding:"10px 12px", textAlign:"right", whiteSpace:"nowrap" }}>
+                    <Btn kind="quiet" onClick={()=>{ setDraft(row); setEditing(row.id); }}>Edit</Btn>
+                    <Btn kind="quiet" onClick={()=>del([row.id])} style={{ color:"#DC2626" }}>Delete</Btn>
+                  </td>
+                </tr>
+              ))}
+              {!rows.length && <tr><td colSpan={mod.columns.length+2} style={{ padding:40, textAlign:"center", color:"#94A3B8" }}>Nothing matches this view.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ padding:"10px 14px", borderTop:"1px solid #F1F5F9", fontSize:12, color:"#94A3B8", display:"flex", justifyContent:"space-between" }}>
+          <span>{rows.length} of {mod.rows.length} records</span>
+          <span>Double-click a row to edit</span>
+        </div>
+      </div>
+
+      <Sheet open={!!editing} onClose={()=>setEditing(null)} width={680}
+        title={editing==="new" ? `New ${mod.label.replace(/s$/,"")}` : `Edit ${draft.id||""}`}
+        sub="Every field here comes from the module's field list — change the list under ⚙ Fields."
+        footer={<><Btn onClick={()=>setEditing(null)}>Cancel</Btn><Btn kind="solid" accent={accent} onClick={save}>Save</Btn></>}>
+        <RecordForm columns={mod.columns} value={draft} onChange={setDraft} />
+      </Sheet>
+
+      <RecordDetail mod={mod} row={detail} accent={accent}
+        related={detail && modKey!=="workorders" ? (allRows?.workorders||[]).filter(w=>w.asset===detail.id || w.assignee===detail.name || w.assignee===detail.id) : []}
+        onClose={()=>setDetail(null)} onEdit={r=>{ setDraft(r); setEditing(r.id); }} />
+
+      <FieldDesigner open={design} onClose={()=>setDesign(false)} mod={mod} accent={accent} onSave={cols=>{ setMod({ ...mod, columns:cols }); toast("Fields updated"); }} />
+      <ImportSheet open={imp} onClose={()=>setImp(false)} mod={mod} accent={accent} onImport={applyImport} />
+    </div>
+  );
+}
+
+/* ── dashboard ───────────────────────────────────────────── */
+function Dashboard({ db, accent, onNav, onDrill }) {
+  const wo = db.workorders.rows, assets = db.assets.rows, inv = db.inventory.rows;
+  const openWo = wo.filter(w=>!["Completed","Closed","Cancelled"].includes(w.status));
+  const today = new Date().toISOString().slice(0,10);
+  const overdue = openWo.filter(w=>w.dueBy && w.dueBy < today);
+  const spend = wo.reduce((s,w)=>s+(Number(w.cost)||0),0);
+  const completedMonth = wo.filter(w=>["Completed","Closed"].includes(w.status));
+  const lowStock = inv.filter(i=>Number(i.stock)<Number(i.min));
+  const kpis = [
+    { label:"Open work orders", value:openWo.length, note:`${wo.filter(w=>w.priority==="Critical"&&!["Closed","Completed"].includes(w.status)).length} critical`, mod:"workorders", rows:openWo },
+    { label:"Overdue", value:overdue.length, note:"past required-by date", tone:overdue.length?"#DC2626":undefined, mod:"workorders", rows:overdue },
+    { label:"Completed", value:completedMonth.length, note:"completed or closed", mod:"workorders", rows:completedMonth },
+    { label:"Assets at risk", value:assets.filter(a=>Number(a.health)<60).length, note:`of ${assets.length} assets`, mod:"assets", rows:assets.filter(a=>Number(a.health)<60) },
+    { label:"PPM overdue", value:db.ppm.rows.filter(p=>p.status==="Overdue").length, note:`${db.ppm.rows.filter(p=>p.status==="Due Soon").length} due soon`, mod:"ppm", rows:db.ppm.rows.filter(p=>["Overdue","Due Soon"].includes(p.status)) },
+    { label:"Compliance gaps", value:db.compliance.rows.filter(c=>c.status!=="Valid").length, note:`${db.compliance.rows.length} certificates tracked`, mod:"compliance", rows:db.compliance.rows.filter(c=>c.status!=="Valid") },
+    { label:"Stock below minimum", value:lowStock.length, note:`${inv.length} items tracked`, mod:"inventory", rows:lowStock },
+    { label:"Maintenance spend", value:money(spend), note:"click for the cost breakdown", mod:"workorders", rows:[...wo].filter(w=>Number(w.cost)>0).sort((a,b)=>(Number(b.cost)||0)-(Number(a.cost)||0)) },
+  ];
+  const byCat = Object.entries(wo.reduce((a,w)=>{ a[w.category]=(a[w.category]||0)+1; return a; },{})).sort((a,b)=>b[1]-a[1]);
+  const maxCat = Math.max(1,...byCat.map(c=>c[1]));
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))", gap:12 }}>
+        {kpis.map(k=>(
+          <button key={k.label} onClick={()=>onDrill({ mod:k.mod, rows:k.rows, title:k.label, sub:`${k.rows.length} record${k.rows.length===1?"":"s"} · click a row for full detail` })}
+            style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:16, cursor:"pointer", textAlign:"left", fontFamily:"inherit", display:"block", width:"100%" }}>
+            <div style={{ fontSize:11.5, color:"#64748B", fontWeight:650 }}>{k.label}</div>
+            <div style={{ fontSize:26, fontWeight:750, color:k.tone||"#0F172A", marginTop:6, letterSpacing:-.5 }}>{k.value}</div>
+            <div style={{ fontSize:11.5, color:"#94A3B8", marginTop:3 }}>{k.note}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))", gap:14 }}>
+        <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:18 }}>
+          <div style={{ fontSize:13.5, fontWeight:750, color:"#0F172A", marginBottom:14 }}>Work orders by category</div>
+          {byCat.map(([c,n])=>(
+            <div key={c} onClick={()=>onDrill({ mod:"workorders", rows:wo.filter(w=>(w.category||"")===c), title:`${c||"Uncategorised"} work orders` })}
+              style={{ display:"flex", alignItems:"center", gap:10, marginBottom:9, cursor:"pointer" }}>
+              <div style={{ width:110, fontSize:12, color:"#475569" }}>{c||"Uncategorised"}</div>
+              <div style={{ flex:1, height:8, background:"#F1F5F9", borderRadius:9 }}>
+                <div style={{ width:`${n/maxCat*100}%`, height:8, background:accent, borderRadius:9 }} />
+              </div>
+              <div style={{ width:20, fontSize:12, fontWeight:650, textAlign:"right", color:"#0F172A" }}>{n}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:18 }}>
+          <div style={{ fontSize:13.5, fontWeight:750, color:"#0F172A", marginBottom:12 }}>Needs attention now</div>
+          {[...overdue.slice(0,3).map(w=>({ t:`${w.id} · ${w.title}`, s:"Overdue", mod:"workorders", row:w })),
+            ...db.compliance.rows.filter(c=>c.status!=="Valid").slice(0,2).map(c=>({ t:`${c.certificate} — ${c.asset}`, s:c.status, mod:"compliance", row:c })),
+            ...inv.filter(i=>i.status!=="OK").slice(0,2).map(i=>({ t:`${i.name} — ${i.stock} left (min ${i.min})`, s:i.status, mod:"inventory", row:i }))
+          ].map((r,i)=>(
+            <div key={i} onClick={()=>onDrill({ mod:r.mod, rows:[r.row], title:r.t, sub:"Click the row to open the full record" })}
+              style={{ display:"flex", justifyContent:"space-between", gap:10, alignItems:"center", padding:"9px 0", borderBottom:"1px solid #F4F7FA", cursor:"pointer" }}>
+              <span style={{ fontSize:12.5, color:"#334155" }}>{r.t}</span><Pill v={r.s} />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── reports ─────────────────────────────────────────────── */
+function Reports({ db, accent, brand, toast }) {
+  const wo = db.workorders.rows;
+  const [range, setRange] = useState({ from:"", to:"" });
+  const inRange = wo.filter(w=>(!range.from||w.raised>=range.from)&&(!range.to||w.raised<=range.to));
+  const closed = inRange.filter(w=>["Completed","Closed"].includes(w.status));
+  const spend = inRange.reduce((s,w)=>s+(Number(w.cost)||0),0);
+
+  const summaryRows = [
+    { Metric:"Work orders raised", Value:inRange.length },
+    { Metric:"Completed / closed", Value:closed.length },
+    { Metric:"Completion rate %", Value: inRange.length ? Math.round(closed.length/inRange.length*100) : 0 },
+    { Metric:"Open work orders", Value:inRange.length-closed.length },
+    { Metric:"Critical open", Value:inRange.filter(w=>w.priority==="Critical"&&!["Completed","Closed"].includes(w.status)).length },
+    { Metric:"Total logged cost (Rs.)", Value:spend },
+    { Metric:"Average cost per WO (Rs.)", Value: inRange.length ? Math.round(spend/inRange.length) : 0 },
+    { Metric:"Assets tracked", Value:db.assets.rows.length },
+    { Metric:"PPM overdue", Value:db.ppm.rows.filter(p=>p.status==="Overdue").length },
+    { Metric:"Compliance gaps", Value:db.compliance.rows.filter(c=>c.status!=="Valid").length },
+    { Metric:"Inventory items below minimum", Value:db.inventory.rows.filter(i=>Number(i.stock)<Number(i.min)).length },
+  ];
+
+  const exportWorkbook = () => {
+    const wb = XLSX.utils.book_new();
+    const add = (name, data, cols) => {
+      const ws = XLSX.utils.json_to_sheet(data);
+      if (cols) ws["!cols"] = cols;
+      XLSX.utils.book_append_sheet(wb, ws, name.slice(0,30));
+    };
+    add("Summary", summaryRows, [{wch:34},{wch:16}]);
+    Object.values(db).forEach(m => add(m.label, m.rows.map(r=>Object.fromEntries(m.columns.map(c=>[c.label, r[c.key] ?? ""]))), m.columns.map(c=>({ wch:Math.max(12,Math.min(38,c.label.length+6)) }))));
+    const byPerson = Object.entries(wo.reduce((a,w)=>{ const k=w.assignee||"Unassigned"; a[k]=a[k]||{ Assignee:k, Total:0, Open:0, Cost:0 }; a[k].Total++; if(!["Completed","Closed"].includes(w.status)) a[k].Open++; a[k].Cost+=Number(w.cost)||0; return a; },{})).map(([,v])=>v);
+    add("By Assignee", byPerson, [{wch:22},{wch:10},{wch:10},{wch:14}]);
+    XLSX.writeFile(wb, `${brand.replace(/\s+/g,"_")}_Full_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
+    toast("Full Excel workbook downloaded");
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:18, display:"flex", gap:12, alignItems:"flex-end", flexWrap:"wrap" }}>
+        <div><Field label="Raised from"><input type="date" value={range.from} onChange={e=>setRange({...range,from:e.target.value})} style={{ ...inputStyle, width:160 }} /></Field></div>
+        <div><Field label="Raised to"><input type="date" value={range.to} onChange={e=>setRange({...range,to:e.target.value})} style={{ ...inputStyle, width:160 }} /></Field></div>
+        <div style={{ flex:1 }} />
+        <Btn onClick={()=>setRange({ from:"", to:"" })}>Clear</Btn>
+        <Btn kind="solid" accent={accent} onClick={exportWorkbook}>📊 Download full Excel report</Btn>
+      </div>
+
+      <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, overflow:"hidden" }}>
+        <div style={{ padding:"14px 18px", fontSize:13.5, fontWeight:750, color:"#0F172A", borderBottom:"1px solid #F1F5F9" }}>Performance summary</div>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <tbody>
+            {summaryRows.map(r=>(
+              <tr key={r.Metric} style={{ borderBottom:"1px solid #F4F7FA" }}>
+                <td style={{ padding:"11px 18px", color:"#475569" }}>{r.Metric}</td>
+                <td style={{ padding:"11px 18px", textAlign:"right", fontWeight:700, color:"#0F172A", fontVariantNumeric:"tabular-nums" }}>
+                  {/Rs\./.test(r.Metric) ? money(r.Value) : r.Value}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ padding:"11px 18px", fontSize:12, color:"#94A3B8" }}>The workbook includes this summary plus one sheet per module and an assignee breakdown.</div>
+      </div>
+    </div>
+  );
+}
+
+/* ── settings ────────────────────────────────────────────── */
+function Settings({ brand, setBrand, accentKey, setAccentKey, db, setDb, density, setDensity, toast, resetAll, savedAt, setSavedAt }) {
+  const backupRef = useRef();
+  const [newMod, setNewMod] = useState("");
+  const accent = ACCENTS[accentKey].c;
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))", gap:14 }}>
+      <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:18 }}>
+        <div style={{ fontSize:13.5, fontWeight:750, marginBottom:14, color:"#0F172A" }}>Branding</div>
+        <Field label="Organisation name"><input value={brand} onChange={e=>setBrand(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Accent colour">
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            {Object.entries(ACCENTS).map(([k,v])=>(
+              <button key={k} onClick={()=>setAccentKey(k)} style={{ padding:"7px 12px", borderRadius:9, cursor:"pointer", fontSize:12.5, fontWeight:650, border:`1.5px solid ${accentKey===k?v.c:"#E2E8F0"}`, background:accentKey===k?v.c+"12":"#fff", color:v.c }}>{v.name}</button>
+            ))}
+          </div>
+        </Field>
+        <Field label="Table density">
+          <div style={{ display:"flex", gap:8 }}>
+            {["comfortable","compact"].map(d=>(
+              <button key={d} onClick={()=>setDensity(d)} style={{ padding:"7px 12px", borderRadius:9, cursor:"pointer", fontSize:12.5, fontWeight:650, border:`1.5px solid ${density===d?accent:"#E2E8F0"}`, background:density===d?accent+"12":"#fff", color:density===d?accent:"#64748B", textTransform:"capitalize" }}>{d}</button>
+            ))}
+          </div>
+        </Field>
+      </div>
+
+      <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:18 }}>
+        <div style={{ fontSize:13.5, fontWeight:750, marginBottom:6, color:"#0F172A" }}>Modules</div>
+        <div style={{ fontSize:12, color:"#94A3B8", marginBottom:14 }}>Rename anything, or add a whole new register — it gets a table, a form, Excel import and Excel export automatically.</div>
+        {Object.entries(db).map(([k,m])=>(
+          <div key={k} style={{ display:"flex", gap:8, alignItems:"center", marginBottom:8 }}>
+            <input value={m.icon} onChange={e=>setDb({ ...db, [k]:{ ...m, icon:e.target.value } })} style={{ ...inputStyle, width:48, textAlign:"center", padding:"7px 4px" }} />
+            <input value={m.label} onChange={e=>setDb({ ...db, [k]:{ ...m, label:e.target.value } })} style={{ ...inputStyle, padding:"7px 9px" }} />
+            <span style={{ fontSize:11.5, color:"#94A3B8", width:64, textAlign:"right" }}>{m.rows.length} rows</span>
+            <Btn kind="quiet" style={{ color:"#DC2626" }} onClick={()=>{ const n={...db}; delete n[k]; setDb(n); toast(`${m.label} removed`); }}>✕</Btn>
+          </div>
+        ))}
+        <div style={{ display:"flex", gap:8, marginTop:12 }}>
+          <input placeholder="New module name, e.g. Cleaning Audits" value={newMod} onChange={e=>setNewMod(e.target.value)} style={inputStyle} />
+          <Btn kind="solid" accent={accent} onClick={()=>{
+            if(!newMod.trim()) return;
+            const key = newMod.toLowerCase().replace(/[^a-z0-9]+/g,"_");
+            setDb({ ...db, [key]:{ label:newMod.trim(), icon:"🗂️", idPrefix:newMod.trim().slice(0,3).toUpperCase(),
+              columns:[col("id","Ref"),col("title","Title"),col("owner","Owner"),col("status","Status","select",["Open","In Progress","Done"]),col("date","Date","date"),col("notes","Notes","long")], rows:[] } });
+            setNewMod(""); toast(`${newMod.trim()} module created`);
+          }}>Add</Btn>
+        </div>
+      </div>
+
+      <div style={{ background:"#fff", border:"1px solid #E9EEF4", borderRadius:14, padding:18 }}>
+        <div style={{ fontSize:13.5, fontWeight:750, marginBottom:6, color:"#0F172A" }}>Data &amp; backups</div>
+        <div style={{ fontSize:12, color:"#94A3B8", marginBottom:14, lineHeight:1.5 }}>
+          {CAN_SAVE
+            ? <>Changes save automatically to this browser and survive a refresh. Storage is per-browser and per-device, so take a backup file to move your data or share it with a colleague.</>
+            : <>This preview can't write to browser storage, so changes last for the session only. Deployed properly it saves automatically — take a backup below either way.</>}
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:14 }}>
+          <Btn kind="solid" accent={accent} onClick={()=>{
+            const blob = new Blob([JSON.stringify({ db, brand, accentKey, density, savedAt:new Date().toISOString() }, null, 2)], { type:"application/json" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = `${brand.replace(/\s+/g,"_")}_FacilityPro_backup_${new Date().toISOString().slice(0,10)}.json`;
+            a.click(); URL.revokeObjectURL(a.href);
+            toast("Backup file downloaded");
+          }}>⬇ Download backup</Btn>
+          <Btn onClick={()=>backupRef.current?.click()}>⬆ Restore backup</Btn>
+          <input ref={backupRef} type="file" accept=".json" style={{ display:"none" }} onChange={async e=>{
+            const f = e.target.files?.[0]; if(!f) return;
+            try {
+              const j = JSON.parse(await f.text());
+              if (!j.db) throw new Error("bad file");
+              if (!confirm("Restoring replaces all current modules and records. Continue?")) return;
+              setDb(j.db);
+              if (j.brand) setBrand(j.brand);
+              if (j.accentKey && ACCENTS[j.accentKey]) setAccentKey(j.accentKey);
+              if (j.density) setDensity(j.density);
+              toast("Backup restored");
+            } catch { toast("That doesn't look like a FacilityPro backup file"); }
+            e.target.value = "";
+          }} />
+        </div>
+        <div style={{ fontSize:11.5, color: CAN_SAVE ? "#059669" : "#D97706", marginBottom:14 }}>
+          {CAN_SAVE
+            ? (savedAt ? `● Saved ${new Date(savedAt).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}` : "● Autosave on")
+            : "● Autosave unavailable in this preview"}
+        </div>
+        <Btn kind="danger" onClick={()=>{ if(confirm("This clears your saved data and returns everything to the demo set. Continue?")) { resetAll(); toast("Reset to demo data"); } }}>Reset to demo data</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ── shell ───────────────────────────────────────────────── */
+export default function FacilityPro() {
+  const [db, setDb] = useState(SAVED?.db || SEED);
+  const [page, setPage] = useState("dashboard");
+  const [brand, setBrand] = useState(SAVED?.brand ?? "Crystal FM");
+  const [accentKey, setAccentKey] = useState(SAVED?.accentKey ?? "teal");
+  const [density, setDensity] = useState(SAVED?.density ?? "comfortable");
+  const [savedAt, setSavedAt] = useState(SAVED?.savedAt || null);
+  const [nav, setNav] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [drill, setDrill] = useState(null);
+  const accent = ACCENTS[accentKey].c;
+
+  const toast = msg => {
+    const id = Math.random();
+    setToasts(t=>[...t,{ id, msg }]);
+    setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)), 2800);
+  };
+  const setMod = (k,m) => setDb(d=>({ ...d, [k]:m }));
+
+  // autosave, debounced so fast typing doesn't thrash storage
+  useEffect(()=>{
+    if (!CAN_SAVE) return;
+    const t = setTimeout(()=>{
+      const stamp = new Date().toISOString();
+      if (storage.save({ db, brand, accentKey, density, savedAt:stamp })) setSavedAt(stamp);
+    }, 600);
+    return ()=>clearTimeout(t);
+  }, [db, brand, accentKey, density]);
+
+  const items = [
+    { key:"dashboard", label:"Dashboard", icon:"◎" },
+    ...Object.entries(db).map(([k,m])=>({ key:k, label:m.label, icon:m.icon, count:m.rows.length })),
+    { key:"reports", label:"Reports", icon:"📈" },
+    { key:"settings", label:"Settings", icon:"⚙" },
+  ];
+  const current = items.find(i=>i.key===page) || items[0];
+
+  const body = () => {
+    if (page==="dashboard") return <Dashboard db={db} accent={accent} onNav={setPage} onDrill={setDrill} />;
+    if (page==="reports") return <Reports db={db} accent={accent} brand={brand} toast={toast} />;
+    if (page==="settings") return <Settings {...{ brand, setBrand, accentKey, setAccentKey, db, setDb, density, setDensity, toast, savedAt, setSavedAt,
+      resetAll:()=>{ storage.clear(); setDb(SEED); setBrand("Crystal FM"); setSavedAt(null); setPage("dashboard"); } }} />;
+    if (db[page]) return <ModulePage modKey={page} mod={db[page]} setMod={m=>setMod(page,m)} accent={accent} toast={toast} brand={brand} allRows={{ workorders: db.workorders?.rows||[] }} />;
+    return null;
+  };
+
+  const NavList = () => (
+    <nav style={{ display:"flex", flexDirection:"column", gap:2 }}>
+      {items.map(i=>{
+        const on = i.key===page;
+        return (
+          <button key={i.key} onClick={()=>{ setPage(i.key); setNav(false); }}
+            style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 11px", borderRadius:10, border:"none", cursor:"pointer", textAlign:"left",
+              background:on?accent+"14":"transparent", color:on?ACCENTS[accentKey].text:"#475569", fontSize:13, fontWeight:on?700:550, fontFamily:"inherit" }}>
+            <span style={{ width:18, textAlign:"center" }}>{i.icon}</span>
+            <span style={{ flex:1 }}>{i.label}</span>
+            {i.count!=null && <span style={{ fontSize:11, color:"#94A3B8", fontVariantNumeric:"tabular-nums" }}>{i.count}</span>}
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  return (
+    <div style={{ display:"flex", minHeight:"100vh", background:"#F6F8FB", fontFamily:'ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif', color:"#0F172A", fontSize: density==="compact"?12.5:13 }}>
+      <style>{`* { box-sizing:border-box } button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline:2px solid ${accent}; outline-offset:1px } input,select,textarea{ font-family:inherit } @media (max-width:900px){ .fp-side{ display:none } } @media (min-width:901px){ .fp-burger{ display:none } }`}</style>
+
+      <aside className="fp-side" style={{ width:232, flexShrink:0, background:"#fff", borderRight:"1px solid #E9EEF4", padding:"18px 12px", position:"sticky", top:0, height:"100vh", overflowY:"auto" }}>
+        <div style={{ padding:"0 8px 16px" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+            <div style={{ width:30, height:30, borderRadius:9, background:accent, color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:14 }}>{brand.slice(0,1)}</div>
+            <div>
+              <div style={{ fontWeight:800, fontSize:14, letterSpacing:-.2 }}>{brand}</div>
+              <div style={{ fontSize:10.5, color:"#94A3B8" }}>FacilityPro v4</div>
+            </div>
+          </div>
+        </div>
+        <NavList />
+      </aside>
+
+      <main style={{ flex:1, minWidth:0, display:"flex", flexDirection:"column" }}>
+        <header style={{ background:"#fff", borderBottom:"1px solid #E9EEF4", padding:"14px 22px", display:"flex", alignItems:"center", gap:12, position:"sticky", top:0, zIndex:50 }}>
+          <button className="fp-burger" onClick={()=>setNav(v=>!v)} style={{ border:"1px solid #E2E8F0", background:"#fff", borderRadius:9, width:34, height:34, cursor:"pointer" }}>☰</button>
+          <div style={{ flex:1, minWidth:0 }}>
+            <h1 style={{ margin:0, fontSize:18, fontWeight:750, letterSpacing:-.3 }}>{current.label}</h1>
+            <div style={{ fontSize:11.5, color:"#94A3B8", marginTop:2 }}>
+              {new Date().toLocaleDateString("en-GB",{ weekday:"long", day:"numeric", month:"long", year:"numeric" })}
+            </div>
+          </div>
+        </header>
+
+        {nav && <div style={{ background:"#fff", borderBottom:"1px solid #E9EEF4", padding:"10px 14px" }}><NavList /></div>}
+
+        <div style={{ padding: density==="compact" ? "14px 16px 40px" : "20px 22px 48px", flex:1 }}>{body()}</div>
+      </main>
+
+      <DrillSheet open={!!drill} onClose={()=>setDrill(null)} title={drill?.title} sub={drill?.sub}
+        mod={drill ? db[drill.mod] : null} rows={drill?.rows||[]} accent={accent} />
+
+      <div style={{ position:"fixed", bottom:20, left:"50%", transform:"translateX(-50%)", display:"flex", flexDirection:"column", gap:8, zIndex:1200, alignItems:"center" }}>
+        {toasts.map(t=>(
+          <div key={t.id} style={{ background:"#0F172A", color:"#fff", padding:"11px 18px", borderRadius:11, fontSize:12.5, fontWeight:550, boxShadow:"0 10px 30px rgba(15,23,42,.3)" }}>{t.msg}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
